@@ -29,7 +29,7 @@ It is designed to:
 
 * 🐍 Python
 * 🔗 LangChain
-* 🧠 LLM (via API)
+* 🧠 Claude (via AWS Bedrock)
 * 📚 Vector Database (for semantic search)
 
 ---
