@@ -1,0 +1,24 @@
+# Secrets
+.env
+
+# Virtual environment
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+
+# Data & vector DBs (RAG-specific)
+data/
+vectorstore/
+
+# Misc
+zother/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
