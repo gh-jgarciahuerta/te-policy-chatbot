@@ -1,8 +1,7 @@
 # Reason for this code:
 # This script validates the structured JSON output generated for the RAG pipeline.
-# It checks that each record matches the expected schema for its chunk type:
-# 1) preparer chunks with atomic rules and Q&A
-# 2) approver chunks with violation scenarios and rejection responses
+# It checks that each record matches the expected schema: one atomic rule with its
+# related Q&A and the policy section markdown it came from.
 # The validator helps catch missing fields, invalid values, duplicate IDs, and weak data quality
 # before the dataset is used for retrieval chunk generation or FAISS indexing.
 
@@ -42,11 +41,10 @@ def is_non_empty_string(value):
     return isinstance(value, str) and value.strip() != ""
 
 
-# Validate one preparer record.
+# Validate one record.
 # Expected schema:
 # {
 #   "id": "...",
-#   "chunk_type": "preparer",
 #   "source_id": "...",
 #   "rule_tag": "...",
 #   "policy_text_markdown": "...",
@@ -57,14 +55,12 @@ def is_non_empty_string(value):
 # Returns:
 # - errors: critical issues that should block downstream use
 # - warnings: non-critical quality issues worth reviewing
-def validate_preparer_record(record, index):
+def validate_record(record, index):
     errors = []
     warnings = []
 
-    # Required fields for preparer chunks
     required_fields = [
         "id",
-        "chunk_type",
         "source_id",
         "rule_tag",
         "policy_text_markdown",
@@ -80,10 +76,6 @@ def validate_preparer_record(record, index):
     # If required fields are missing, stop deeper validation for this record
     if errors:
         return errors, warnings
-
-    # Enforce correct chunk type
-    if record["chunk_type"] != "preparer":
-        errors.append(f"Record {index}: invalid chunk_type for preparer record")
 
     # Validate required text fields
     if not is_non_empty_string(record["id"]):
@@ -140,98 +132,9 @@ def validate_preparer_record(record, index):
     return errors, warnings
 
 
-# Validate one approver record.
-# Expected schema:
-# {
-#   "id": "...",
-#   "chunk_type": "approver",
-#   "source_id": "...",
-#   "violation_tag": "...",
-#   "policy_text_markdown": "...",
-#   "violation_scenario": "...",
-#   "rejection_response": "..."
-# }
-#
-# Returns:
-# - errors: critical issues that should block downstream use
-# - warnings: non-critical quality issues worth reviewing
-def validate_approver_record(record, index):
-    errors = []
-    warnings = []
-
-    # Required fields for approver chunks
-    required_fields = [
-        "id",
-        "chunk_type",
-        "source_id",
-        "violation_tag",
-        "policy_text_markdown",
-        "violation_scenario",
-        "rejection_response",
-    ]
-
-    # Check that all required fields exist
-    for field in required_fields:
-        if field not in record:
-            errors.append(f"Record {index}: missing '{field}'")
-
-    # If required fields are missing, stop deeper validation for this record
-    if errors:
-        return errors, warnings
-
-    # Enforce correct chunk type
-    if record["chunk_type"] != "approver":
-        errors.append(f"Record {index}: invalid chunk_type for approver record")
-
-    # Validate required text fields
-    if not is_non_empty_string(record["id"]):
-        errors.append(f"Record {index}: invalid 'id'")
-
-    if not is_non_empty_string(record["source_id"]):
-        errors.append(f"Record {index}: invalid 'source_id'")
-
-    if not is_non_empty_string(record["violation_tag"]):
-        errors.append(f"Record {index}: invalid 'violation_tag'")
-
-    if not is_non_empty_string(record["violation_scenario"]):
-        errors.append(f"Record {index}: empty 'violation_scenario'")
-
-    if not is_non_empty_string(record["rejection_response"]):
-        errors.append(f"Record {index}: empty 'rejection_response'")
-
-    # Markdown is useful context, but allowed to be empty as a warning rather than an error
-    if not is_non_empty_string(record["policy_text_markdown"]):
-        warnings.append(f"Record {index} ({record['id']}): empty markdown")
-
-    return errors, warnings
-
-
-# Route record validation based on chunk_type.
-# This allows the dataset to contain multiple record schemas in one file.
-def validate_record(record, index):
-    errors = []
-    warnings = []
-
-    if "chunk_type" not in record:
-        errors.append(f"Record {index}: missing 'chunk_type'")
-        return errors, warnings
-
-    chunk_type = record["chunk_type"]
-
-    if chunk_type == "preparer":
-        return validate_preparer_record(record, index)
-
-    if chunk_type == "approver":
-        return validate_approver_record(record, index)
-
-    errors.append(f"Record {index}: unknown chunk_type '{chunk_type}'")
-    return errors, warnings
-
-
 # Validate the full dataset.
 # This function:
 # - checks duplicate IDs
-# - counts preparer vs approver chunks
 # - runs record-level validation on every item
 def validate_dataset(data):
     errors = []
@@ -245,38 +148,27 @@ def validate_dataset(data):
         if i and c > 1:
             errors.append(f"Duplicate id: {i}")
 
-    preparer_count = 0
-    approver_count = 0
-
     # Validate each record individually
     for idx, record in enumerate(data, start=1):
         if not isinstance(record, dict):
             errors.append(f"Record {idx} not an object")
             continue
 
-        chunk_type = record.get("chunk_type")
-        if chunk_type == "preparer":
-            preparer_count += 1
-        elif chunk_type == "approver":
-            approver_count += 1
-
         e, w = validate_record(record, idx)
         errors.extend(e)
         warnings.extend(w)
 
-    return errors, warnings, preparer_count, approver_count
+    return errors, warnings
 
 
 # Print a readable validation summary to the console.
-# This includes totals, counts by chunk type, and detailed error/warning lists.
-def print_summary(data, errors, warnings, preparer_count, approver_count):
+# This includes totals and detailed error/warning lists.
+def print_summary(data, errors, warnings):
     print("=" * 60)
     print("VALIDATION SUMMARY")
     print("=" * 60)
 
     print(f"Total records: {len(data)}")
-    print(f"Preparer chunks: {preparer_count}")
-    print(f"Approver chunks: {approver_count}")
     print(f"Errors: {len(errors)}")
     print(f"Warnings: {len(warnings)}\n")
 
@@ -304,8 +196,8 @@ def print_summary(data, errors, warnings, preparer_count, approver_count):
 # 3. Print a summary of results
 def main():
     data = load_json(INPUT_FILE)
-    errors, warnings, preparer_count, approver_count = validate_dataset(data)
-    print_summary(data, errors, warnings, preparer_count, approver_count)
+    errors, warnings = validate_dataset(data)
+    print_summary(data, errors, warnings)
 
 
 # Script entry point

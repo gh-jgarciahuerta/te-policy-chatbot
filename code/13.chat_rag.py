@@ -1,11 +1,8 @@
 # Reason for this code:
 # This script runs the chat-based RAG interface for the policy system.
-# It loads two separate FAISS indexes:
-# 1) preparer index for guidance on what should be done
-# 2) approver index for identifying violations and rejection reasoning
-# At runtime, it first asks whether the user is a preparer or approver,
-# then routes each question to the correct index, retrieves relevant chunks,
-# sends them to the Bedrock chat model, and prints both the answer and supporting policy references.
+# It loads the FAISS index built from atomic policy rules, retrieves the chunks most relevant
+# to each question, sends them to the Bedrock chat model, and prints both the answer and the
+# supporting policy references.
 
 import os
 import re
@@ -25,9 +22,7 @@ load_dotenv()
 # =========================
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-INDEX_ROOT_DIR = PROJECT_ROOT / "vectorstore"
-PREPARER_INDEX_DIR = INDEX_ROOT_DIR / "preparer"
-APPROVER_INDEX_DIR = INDEX_ROOT_DIR / "approver"
+INDEX_DIR = PROJECT_ROOT / "vectorstore"
 
 MAX_TOKENS = 300
 TEMPERATURE = 0.4
@@ -37,6 +32,12 @@ AWS_REGION = os.getenv("AWS_REGION")
 AWS_BEARER_TOKEN_BEDROCK = os.getenv("AWS_BEARER_TOKEN_BEDROCK")
 MODEL_ID = os.getenv("BEDROCK_CHAT_MODEL")
 EMBEDDING_MODEL_ID = os.getenv("BEDROCK_EMBED_MODEL")
+
+WELCOME_MESSAGE = (
+    "RAG chatbot ready.\n"
+    "Type 'quit' to exit.\n"
+    "Type 'clear' to reset the screen.\n"
+)
 
 # =========================
 # CLEAR CONSOLE
@@ -48,30 +49,16 @@ def clear_console():
 
 
 # =========================
-# PROMPTS
+# PROMPT
 # =========================
 
-
-def build_system_prompt(mode: str) -> str:
-    if mode == "approver":
-        return (
-            "You answer approver policy questions using only the provided context.\n"
-            "Answer in 1-2 sentences maximum.\n"
-            "Prefer the shortest complete answer.\n"
-            "You may make simple policy-preserving inferences.\n"
-            "Use '<rule> unless <exception>' when applicable.\n"
-            "Do not restate the question.\n"
-            "If insufficient info, say exactly: 'I don't have enough information to answer that question.'\n\n"
-            "Context:\n{context}"
-        )
-
-    return (
-        "You answer preparer policy questions using only the provided context.\n"
-        "Be concise and action-oriented.\n"
-        "Focus on what the user should do.\n"
-        "If insufficient info, say exactly: 'I don't have enough information to answer that question.'\n\n"
-        "Context:\n{context}"
-    )
+SYSTEM_PROMPT = (
+    "You answer T&E policy questions using only the provided context.\n"
+    "Be concise and action-oriented.\n"
+    "Focus on what the user should do.\n"
+    "If insufficient info, say exactly: 'I don't have enough information to answer that question.'\n\n"
+    "Context:\n{context}"
+)
 
 
 # =========================
@@ -81,7 +68,7 @@ def build_system_prompt(mode: str) -> str:
 
 def extract_policy_reference(text: str):
     match = re.search(
-        r"Policy Section:\s*(.*?)(?:\n(?:Atomic Rule|Violation Scenario):|\Z)",
+        r"Policy Section:\s*(.*?)(?:\nAtomic Rule:|\Z)",
         text,
         flags=re.DOTALL,
     )
@@ -120,21 +107,6 @@ def dedupe_sources_by_section(docs):
         unique.append(doc)
 
     return unique
-
-
-# =========================
-# MODE PROMPT
-# =========================
-
-
-def prompt_for_mode():
-    while True:
-        role = input("Are you a preparer or approver? ").strip().lower()
-        if role in {"preparer", "p"}:
-            return "preparer"
-        if role in {"approver", "a"}:
-            return "approver"
-        print("Please enter 'preparer' or 'approver'.")
 
 
 # =========================
@@ -179,11 +151,11 @@ def build_llm():
 # =========================
 
 
-def setup_qa_chain(vectorstore, mode):
+def setup_qa_chain(vectorstore):
     llm = build_llm()
 
     prompt = ChatPromptTemplate.from_messages(
-        [("system", build_system_prompt(mode)), ("human", "{input}")]
+        [("system", SYSTEM_PROMPT), ("human", "{input}")]
     )
 
     doc_chain = create_stuff_documents_chain(llm, prompt)
@@ -197,13 +169,11 @@ def setup_qa_chain(vectorstore, mode):
 # =========================
 
 
-def process_query(query, mode, qa_chain, retriever):
-    retrieval_query = f"{mode}: {query}"
-
-    docs = retriever.invoke(retrieval_query)
+def process_query(query, qa_chain, retriever):
+    docs = retriever.invoke(query)
     docs = dedupe_sources_by_section(docs)
 
-    result = qa_chain.invoke({"input": retrieval_query})
+    result = qa_chain.invoke({"input": query})
     answer = result.get("answer", "No answer returned.")
 
     return answer, docs
@@ -242,22 +212,14 @@ def print_sources(sources):
 
 
 def main():
-    preparer_vs = load_vectorstore(PREPARER_INDEX_DIR)
-    approver_vs = load_vectorstore(APPROVER_INDEX_DIR)
+    vectorstore = load_vectorstore(INDEX_DIR)
+    qa_chain, retriever = setup_qa_chain(vectorstore)
 
     clear_console()
-
-    print(
-        "RAG chatbot ready.\n"
-        "Type 'quit' to exit.\n"
-        "Type 'clear' to reset the screen.\n"
-        "Type 'switch' to change between preparer and approver.\n"
-    )
-
-    current_mode = prompt_for_mode()
+    print(WELCOME_MESSAGE)
 
     while True:
-        query = input(f"\n[{current_mode}] Q: ").strip()
+        query = input("\nQ: ").strip()
 
         if query.lower() == "quit":
             break
@@ -267,31 +229,11 @@ def main():
 
         if query.lower() in {"clear", "cls"}:
             clear_console()
-            print(
-                "RAG chatbot ready.\n"
-                "Type 'quit' to exit.\n"
-                "Type 'clear' to reset the screen.\n"
-                "Type 'switch' to change between preparer and approver.\n"
-            )
+            print(WELCOME_MESSAGE)
             continue
 
-        if query.lower() in {"switch", "change role", "change mode"}:
-            clear_console()
-            print(
-                "RAG chatbot ready.\n"
-                "Type 'quit' to exit.\n"
-                "Type 'clear' to reset the screen.\n"
-                "Type 'switch' to change between preparer and approver.\n"
-            )
-            current_mode = prompt_for_mode()
-            continue
+        answer, sources = process_query(query, qa_chain, retriever)
 
-        vectorstore = approver_vs if current_mode == "approver" else preparer_vs
-        qa_chain, retriever = setup_qa_chain(vectorstore, current_mode)
-
-        answer, sources = process_query(query, current_mode, qa_chain, retriever)
-
-        print(f"\nMode: {current_mode}")
         print(f"\nA: {answer}")
 
         print_sources(sources)

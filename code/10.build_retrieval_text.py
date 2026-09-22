@@ -1,7 +1,7 @@
 # Reason for this code:
 # This script converts the structured policy JSON into retrieval-ready text chunks for the RAG system.
-# It takes the parsed preparer and approver records and turns each one into a formatted text block
-# plus lightweight metadata. The output is used downstream for embedding and FAISS index creation.
+# It takes each atomic-rule record and turns it into a formatted text block plus lightweight
+# metadata. The output is used downstream for embedding and FAISS index creation.
 # output: 11.retrieval_chunks.json
 
 import json
@@ -38,7 +38,7 @@ def normalize_text(text):
     return str(text).replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
-# Build the formatted Q&A section for preparer retrieval chunks.
+# Build the formatted Q&A section for a retrieval chunk.
 # This turns a list of question/answer objects into a readable text block.
 # If no valid Q&A exists, return a default "None" section.
 def build_related_qa_text(qa_items):
@@ -69,15 +69,14 @@ def build_related_qa_text(qa_items):
     return "\n".join(lines)
 
 
-# Build the retrieval text for a preparer chunk.
+# Build the retrieval text for one record.
 # This includes:
-# - chunk type
 # - section ID
 # - rule tag
 # - policy section
 # - atomic rule
 # - related Q&A
-def build_preparer_chunk_text(record):
+def build_chunk_text(record):
     source_id = normalize_text(record.get("source_id", ""))
     rule_tag = normalize_text(record.get("rule_tag", ""))
     policy_text_markdown = normalize_text(record.get("policy_text_markdown", ""))
@@ -85,7 +84,6 @@ def build_preparer_chunk_text(record):
     qa_items = record.get("qa", [])
 
     parts = [
-        f"Chunk Type: preparer",
         f"Section ID: {source_id or 'None'}",
         f"Rule Tag: {rule_tag or 'None'}",
         "",
@@ -101,83 +99,13 @@ def build_preparer_chunk_text(record):
     return "\n".join(parts).strip()
 
 
-# Build the retrieval text for an approver chunk.
-# This includes:
-# - chunk type
-# - section ID
-# - violation tag
-# - policy section
-# - violation scenario
-# - rejection response
-def build_approver_chunk_text(record):
-    source_id = normalize_text(record.get("source_id", ""))
-    violation_tag = normalize_text(record.get("violation_tag", ""))
-    policy_text_markdown = normalize_text(record.get("policy_text_markdown", ""))
-    violation_scenario = normalize_text(record.get("violation_scenario", ""))
-    rejection_response = normalize_text(record.get("rejection_response", ""))
-
-    parts = [
-        f"Chunk Type: approver",
-        f"Section ID: {source_id or 'None'}",
-        f"Violation Tag: {violation_tag or 'None'}",
-        "",
-        "Policy Section:",
-        policy_text_markdown if policy_text_markdown else "None",
-        "",
-        "Violation Scenario:",
-        violation_scenario if violation_scenario else "None",
-        "",
-        "Rejection Response:",
-        rejection_response if rejection_response else "None",
-    ]
-
-    return "\n".join(parts).strip()
-
-
-# Route each record to the correct text builder based on chunk_type.
-# Includes a backward-compatible fallback for older records that may not
-# explicitly include chunk_type but still contain recognizable fields.
-def build_chunk_text(record):
-    chunk_type = normalize_text(record.get("chunk_type", "")).lower()
-
-    if chunk_type == "preparer":
-        return build_preparer_chunk_text(record)
-    if chunk_type == "approver":
-        return build_approver_chunk_text(record)
-
-    # Backward compatibility fallback for older record shapes
-    if "atomic_rule" in record or "qa" in record:
-        return build_preparer_chunk_text(record)
-    if "violation_scenario" in record or "rejection_response" in record:
-        return build_approver_chunk_text(record)
-
-    raise ValueError(
-        f"Unknown or unsupported chunk_type in record: {record.get('id', '<missing id>')}"
-    )
-
-
 # Build lightweight metadata for the retrieval chunk.
 # This metadata is used downstream for filtering, indexing, and source tracing.
 def build_metadata(record):
-    chunk_type = normalize_text(record.get("chunk_type", "")).lower()
-    metadata = {
+    return {
         "source_id": normalize_text(record.get("source_id", "")),
-        "chunk_type": chunk_type or "unknown",
+        "rule_tag": normalize_text(record.get("rule_tag", "")),
     }
-
-    # Attach the tag that matches the record type
-    if chunk_type == "preparer":
-        metadata["rule_tag"] = normalize_text(record.get("rule_tag", ""))
-    elif chunk_type == "approver":
-        metadata["violation_tag"] = normalize_text(record.get("violation_tag", ""))
-    else:
-        # Backward compatibility fallback if chunk_type is missing
-        if "rule_tag" in record:
-            metadata["rule_tag"] = normalize_text(record.get("rule_tag", ""))
-        if "violation_tag" in record:
-            metadata["violation_tag"] = normalize_text(record.get("violation_tag", ""))
-
-    return metadata
 
 
 # Convert one parsed JSON record into the final retrieval chunk format:

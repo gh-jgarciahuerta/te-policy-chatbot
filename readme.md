@@ -7,21 +7,17 @@ This project is a Retrieval-Augmented Generation (RAG) chatbot built to assist w
 It is designed to:
 
 * 💬 Help employees quickly find answers about T&E policy rules
-* ✅ Support approvers in determining how to handle issues with expense reports
+* ✅ Point users to the exact policy section that supports each answer
 
 ---
 
 ## 🧠 Use Cases
 
-* **Employees** can ask:
+* Users can ask:
 
   * “Is this expense reimbursable?”
   * “What are the limits for meals or travel?”
-
-* **Approvers** can ask:
-
-  * “How should I handle a missing receipt?”
-  * “Is this expense compliant with policy?”
+  * “What do I do if I'm missing a receipt?”
 
 ---
 

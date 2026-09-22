@@ -1,8 +1,9 @@
 # Reason for this code:
 # This script transforms the source T&E policy CSV into a structured JSON dataset for RAG.
-# It parses each row into two independent chunk families:
-# 1) preparer chunks built from atomic rules and related Q&A
-# 2) approver chunks built from violation scenarios and rejection responses
+# Each CSV row holds one policy section. The section's "Atomic Rule" column contains one or
+# more tagged rules ([a], [b], ...), and the "Q&A" column contains tagged question/answer
+# examples that reference those same tags. Every atomic rule becomes one JSON record, with
+# its matching Q&A attached.
 # The output JSON is then used downstream for validation, retrieval chunk creation, and vector indexing.
 # Output: 8.policyInJson.json
 
@@ -183,49 +184,19 @@ def parse_qa_tagged(text):
     return qa_items
 
 
-# Parse simple tagged text blocks for approver fields such as:
-# - Violation_Scenario
-# - Rejection_Response
-#
-# Example input:
-# [a]
-# Missing banking information
-#
-# [b]
-# Invalid expense type used
-#
-# Returns:
-# [
-#   {"tag": "a", "body": "Missing banking information"},
-#   {"tag": "b", "body": "Invalid expense type used"}
-# ]
-#
-# If a block has multiple tags like [a,b], duplicate the same body for both tags.
-def parse_simple_tagged_blocks(text):
-    blocks = split_blocks_by_tag(text)
-    out = []
-
-    for block in blocks:
-        for tag in block["tags"]:
-            out.append({"tag": tag, "body": block["body"]})
-
-    return out
-
-
 # Build a stable output chunk ID.
 # Example:
-# - source_id=7.10.1, chunk_type=rule, tag=a -> 7.10.1-rule-a
-# - source_id=7.10.1, chunk_type=violation, tag=b -> 7.10.1-violation-b
-def build_chunk_id(source_id, chunk_type, tag):
+# - source_id=7.10.1, tag=a -> 7.10.1-rule-a
+def build_chunk_id(source_id, tag):
     if source_id:
-        return f"{source_id}-{chunk_type}-{tag}"
-    return f"{chunk_type}-{tag}"
+        return f"{source_id}-rule-{tag}"
+    return f"rule-{tag}"
 
 
 # Main pipeline:
 # 1. Read the CSV
-# 2. Parse each row
-# 3. Build preparer and approver chunk records
+# 2. Parse each row's atomic rules and Q&A
+# 3. Build one record per atomic rule
 # 4. Save final JSON output
 def main():
     output = []
@@ -251,8 +222,6 @@ def main():
             # Pull tagged source columns, allowing for alternate header names where needed
             atomic_tagged = get_value(row, ["Atomic Rule Tagged", "Atomic Rule"])
             qa_tagged = get_value(row, ["Q&A Tagged", "Q&A"])
-            violation_tagged = get_value(row, ["Violation_Scenario"])
-            response_tagged = get_value(row, ["Rejection_Response"])
 
             # Print previews for the first few rows for debugging and schema validation
             if row_num <= 3:
@@ -261,15 +230,8 @@ def main():
                 print(repr(atomic_tagged[:500]))
                 print("Q&A cell preview:")
                 print(repr(qa_tagged[:500]))
-                print("Violation_Scenario preview:")
-                print(repr(violation_tagged[:500]))
-                print("Rejection_Response preview:")
-                print(repr(response_tagged[:500]))
                 print("-" * 80)
 
-            # ----------------------------
-            # PREPARER PARSING
-            # ----------------------------
             # Parse atomic rules and tagged Q&A from the row
             atomic_rules = parse_atomic_rule_tagged(atomic_tagged)
             qa_items = parse_qa_tagged(qa_tagged)
@@ -284,7 +246,7 @@ def main():
                     for i, rule in enumerate(old_rules)
                 ]
 
-            # Group Q&A items by tag so each preparer chunk can attach only its relevant examples
+            # Group Q&A items by tag so each record can attach only its relevant examples
             qa_by_tag = {}
             for qa in qa_items:
                 for tag in qa["tags"]:
@@ -292,87 +254,32 @@ def main():
                         {"question": qa["question"], "answer": qa["answer"]}
                     )
 
-            # ----------------------------
-            # APPROVER PARSING
-            # ----------------------------
-            # Parse violation scenarios and rejection responses as simple tagged blocks
-            violation_blocks = parse_simple_tagged_blocks(violation_tagged)
-            response_blocks = parse_simple_tagged_blocks(response_tagged)
-
-            # Build lookup dictionaries by tag for quick chunk construction
-            violation_by_tag = {item["tag"]: item["body"] for item in violation_blocks}
-            response_by_tag = {item["tag"]: item["body"] for item in response_blocks}
-
-            # Collect all approver tags seen in either violations or responses
-            approver_tags = sorted(
-                set(violation_by_tag.keys()) | set(response_by_tag.keys())
-            )
-
             # Print per-row parse summary for debugging
             print(
                 f"Row {row_num}: source_id={source_id!r}, "
-                f"preparer_rules={len(atomic_rules)}, "
-                f"qa_items={len(qa_items)}, "
-                f"approver_tags={len(approver_tags)}"
+                f"rules={len(atomic_rules)}, "
+                f"qa_items={len(qa_items)}"
             )
 
-            # Warn if approver columns contain content but failed to parse into tagged blocks
-            if violation_tagged and not violation_blocks:
+            # Warn about Q&A tags that have no matching atomic rule (they would be dropped)
+            rule_tags = {rule["tag"] for rule in atomic_rules}
+            for tag in sorted(set(qa_by_tag) - rule_tags):
                 print(
-                    f"WARNING Row {row_num}: Violation_Scenario exists but no tagged blocks were parsed."
+                    f"WARNING Row {row_num}: Q&A tag [{tag}] has no matching atomic rule."
                 )
 
-            if response_tagged and not response_blocks:
-                print(
-                    f"WARNING Row {row_num}: Rejection_Response exists but no tagged blocks were parsed."
-                )
-
-            # Warn about partial approver pairs where one side is missing
-            for tag in approver_tags:
-                if tag not in violation_by_tag:
-                    print(
-                        f"WARNING Row {row_num}: approver tag [{tag}] has response but no violation."
-                    )
-                if tag not in response_by_tag:
-                    print(
-                        f"WARNING Row {row_num}: approver tag [{tag}] has violation but no response."
-                    )
-
-            # ----------------------------
-            # EMIT PREPARER CHUNKS
-            # ----------------------------
-            # Each atomic rule becomes one preparer chunk.
-            # Related Q&A is attached by local tag.
+            # Each atomic rule becomes one record. Related Q&A is attached by local tag.
             for rule in atomic_rules:
                 tag = rule["tag"]
 
                 output.append(
                     {
-                        "id": build_chunk_id(source_id, "rule", tag),
-                        "chunk_type": "preparer",
+                        "id": build_chunk_id(source_id, tag),
                         "source_id": source_id,
                         "rule_tag": tag,
                         "policy_text_markdown": markdown,
                         "atomic_rule": rule["atomic_rule"],
                         "qa": qa_by_tag.get(tag, []),
-                    }
-                )
-
-            # ----------------------------
-            # EMIT APPROVER CHUNKS
-            # ----------------------------
-            # Each approver tag becomes one approver chunk.
-            # Violation and rejection fields are joined by local tag.
-            for tag in approver_tags:
-                output.append(
-                    {
-                        "id": build_chunk_id(source_id, "violation", tag),
-                        "chunk_type": "approver",
-                        "source_id": source_id,
-                        "violation_tag": tag,
-                        "policy_text_markdown": markdown,
-                        "violation_scenario": violation_by_tag.get(tag, ""),
-                        "rejection_response": response_by_tag.get(tag, ""),
                     }
                 )
 
