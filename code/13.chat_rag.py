@@ -5,14 +5,18 @@
 # kinds of match surface. The index only embeds each atomic rule and its Q&A; the full
 # policy section text is stored as metadata and stitched into the model's context here,
 # once per section, so the model sees the authoritative wording without it having skewed
-# retrieval. The answer is printed along with the supporting policy references.
+# retrieval. The chat keeps a rolling window of recent turns so follow-up questions work:
+# a follow-up is first rewritten into a standalone question (using the history) before
+# retrieval, and the history is also passed to the model when it answers.
+# The answer is printed along with the supporting policy references.
 
 import os
 import re
 from pathlib import Path
 
 from dotenv import load_dotenv
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_aws import ChatBedrockConverse, BedrockEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.retrievers import BM25Retriever
@@ -27,8 +31,14 @@ load_dotenv()
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 INDEX_DIR = PROJECT_ROOT / "vectorstore"
 
-MAX_TOKENS = 300
+# Upper bound on answer length. Multi-part answers (rules with several exceptions) were
+# being cut off at 300; 1024 leaves room while still capping runaway output and cost.
+MAX_TOKENS = 1024
 TEMPERATURE = 0.1
+
+# Conversation memory: how many previous turns (one turn = question + answer) to keep.
+# Older turns are dropped so the prompt stays bounded.
+MEMORY_TURNS = 5
 
 # How many candidates each retriever returns, and how many survive fusion.
 RETRIEVER_K = 8
@@ -49,7 +59,8 @@ EMBEDDING_MODEL_ID = os.getenv("BEDROCK_EMBED_MODEL")
 WELCOME_MESSAGE = (
     "RAG chatbot ready.\n"
     "Type 'quit' to exit.\n"
-    "Type 'clear' to reset the screen.\n"
+    "Type 'new' to start a new conversation (forgets previous questions).\n"
+    "Type 'clear' to reset the screen and start a new conversation.\n"
 )
 
 # =========================
@@ -62,19 +73,42 @@ def clear_console():
 
 
 # =========================
-# PROMPT
+# PROMPTS
 # =========================
 
 SYSTEM_PROMPT = (
     "You answer T&E policy questions using only the provided context.\n"
     "Be concise and action-oriented.\n"
     "Focus on what the user should do.\n"
+    "Use the conversation so far to understand follow-up questions, but base the "
+    "answer only on the context below.\n"
     "If insufficient info, say exactly: 'I don't have enough information to answer that question.'\n\n"
     "Context:\n{context}"
 )
 
 PROMPT = ChatPromptTemplate.from_messages(
-    [("system", SYSTEM_PROMPT), ("human", "{input}")]
+    [
+        ("system", SYSTEM_PROMPT),
+        MessagesPlaceholder("history"),
+        ("human", "{input}"),
+    ]
+)
+
+# Rewrites a follow-up ("what about international?") into a standalone question
+# ("Is alcohol reimbursable on international trips?") so retrieval has the full meaning.
+# Only used when there is prior history.
+REWRITE_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "Given the conversation so far and a follow-up question, rewrite the follow-up "
+            "as a single standalone question that includes any subject it refers back to. "
+            "If it is already standalone, return it unchanged. "
+            "Return only the rewritten question, with no explanation.",
+        ),
+        MessagesPlaceholder("history"),
+        ("human", "{input}"),
+    ]
 )
 
 
@@ -222,22 +256,68 @@ def build_llm():
     return ChatBedrockConverse(**kwargs)
 
 
+def message_text(response):
+    return response.content if isinstance(response.content, str) else str(response.content)
+
+
+# =========================
+# CONVERSATION MEMORY
+# =========================
+
+
+class ConversationMemory:
+    # Rolling window of the last MEMORY_TURNS question/answer pairs as LangChain messages.
+    def __init__(self, max_turns=MEMORY_TURNS):
+        self.max_turns = max_turns
+        self.messages = []
+
+    def add_turn(self, question, answer):
+        self.messages.append(HumanMessage(content=question))
+        self.messages.append(AIMessage(content=answer))
+        # Two messages per turn
+        self.messages = self.messages[-(self.max_turns * 2) :]
+
+    def history(self):
+        return list(self.messages)
+
+    def reset(self):
+        self.messages = []
+
+
+# Turn a follow-up into a standalone question for retrieval. With no history, the
+# question is used as-is and no extra model call is made.
+def rewrite_query(query, history, llm):
+    if not history:
+        return query
+
+    messages = REWRITE_PROMPT.format_messages(history=history, input=query)
+    rewritten = message_text(llm.invoke(messages)).strip()
+
+    return rewritten or query
+
+
 # =========================
 # PROCESS QUERY
 # =========================
 
 
-def process_query(query, retriever, llm):
+def process_query(query, retriever, llm, memory):
+    history = memory.history()
+
+    # Resolve references to earlier turns before searching
+    search_query = rewrite_query(query, history, llm)
+
     # Hybrid retrieval, then keep the top fused results
-    docs = retriever.invoke(query)[:TOP_K]
+    docs = retriever.invoke(search_query)[:TOP_K]
 
     context = build_context(docs)
-    messages = PROMPT.format_messages(context=context, input=query)
+    messages = PROMPT.format_messages(context=context, history=history, input=query)
 
-    response = llm.invoke(messages)
-    answer = response.content if isinstance(response.content, str) else str(response.content)
+    answer = message_text(llm.invoke(messages)).strip() or "No answer returned."
 
-    return answer.strip() or "No answer returned.", dedupe_sources_by_section(docs)
+    memory.add_turn(query, answer)
+
+    return answer, dedupe_sources_by_section(docs), search_query
 
 
 # =========================
@@ -276,6 +356,7 @@ def main():
     vectorstore = load_vectorstore(INDEX_DIR)
     retriever = build_retriever(vectorstore)
     llm = build_llm()
+    memory = ConversationMemory()
 
     clear_console()
     print(WELCOME_MESSAGE)
@@ -289,12 +370,22 @@ def main():
         if not query:
             continue
 
+        if query.lower() == "new":
+            memory.reset()
+            print("Started a new conversation.")
+            continue
+
         if query.lower() in {"clear", "cls"}:
+            memory.reset()
             clear_console()
             print(WELCOME_MESSAGE)
             continue
 
-        answer, sources = process_query(query, retriever, llm)
+        answer, sources, search_query = process_query(query, retriever, llm, memory)
+
+        # Show the user how their follow-up was interpreted
+        if search_query != query:
+            print(f"\n(Searching for: {search_query})")
 
         print(f"\nA: {answer}")
 
