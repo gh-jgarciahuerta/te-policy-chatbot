@@ -1,7 +1,9 @@
 # Reason for this code:
 # This script builds the FAISS vector index for the RAG system using retrieval-ready chunks.
-# Every chunk (one atomic rule plus its related Q&A and policy section) is embedded and stored
-# in a single index, saved alongside a manifest for traceability and reproducibility.
+# Each chunk's compact "text" (section title + atomic rule + related Q&A) is embedded.
+# The full policy section markdown travels along as document metadata so the chat step
+# can show it at answer time without it having influenced the embedding.
+# The index is saved alongside a manifest for traceability and reproducibility.
 
 import os
 import json
@@ -48,6 +50,7 @@ if missing:
 
 
 # Load retrieval chunks JSON and convert them into LangChain Document objects.
+# page_content is the compact embedded text; metadata carries the full policy section.
 def load_json_chunks(file_path: Path):
     if not file_path.is_file():
         raise FileNotFoundError(f"JSON file not found: {file_path}")
@@ -79,6 +82,8 @@ def load_json_chunks(file_path: Path):
                     "id": item.get("id"),
                     "source_id": item_metadata.get("source_id"),
                     "rule_tag": item_metadata.get("rule_tag"),
+                    "section_title": item_metadata.get("section_title", ""),
+                    "policy_text_markdown": item_metadata.get("policy_text_markdown", ""),
                     "source": str(file_path),
                 },
             )
@@ -103,6 +108,8 @@ def save_manifest(index_dir: Path, document_count: int):
         "embedding_model_id": EMBEDDING_MODEL_ID,
         "aws_region": AWS_REGION,
         "document_count": document_count,
+        "embedded_fields": ["section_title", "atomic_rule", "qa"],
+        "metadata_only_fields": ["policy_text_markdown"],
     }
 
     manifest_path = index_dir / "manifest.json"

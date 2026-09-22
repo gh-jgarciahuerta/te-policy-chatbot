@@ -1,8 +1,11 @@
 # Reason for this code:
 # This script runs the chat-based RAG interface for the policy system.
-# It loads the FAISS index built from atomic policy rules, retrieves the chunks most relevant
-# to each question, sends them to the Bedrock chat model, and prints both the answer and the
-# supporting policy references.
+# Retrieval is hybrid: a FAISS vector search (semantic meaning) and a BM25 keyword search
+# (exact terms like dollar amounts, section numbers, "per diem") are fused so that both
+# kinds of match surface. The index only embeds each atomic rule and its Q&A; the full
+# policy section text is stored as metadata and stitched into the model's context here,
+# once per section, so the model sees the authoritative wording without it having skewed
+# retrieval. The answer is printed along with the supporting policy references.
 
 import os
 import re
@@ -12,8 +15,8 @@ from dotenv import load_dotenv
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_aws import ChatBedrockConverse, BedrockEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain_classic.chains import create_retrieval_chain
-from langchain_classic.chains.combine_documents import create_stuff_documents_chain
+from langchain_community.retrievers import BM25Retriever
+from langchain_classic.retrievers import EnsembleRetriever
 
 load_dotenv()
 
@@ -25,8 +28,18 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 INDEX_DIR = PROJECT_ROOT / "vectorstore"
 
 MAX_TOKENS = 300
-TEMPERATURE = 0.4
+TEMPERATURE = 0.1
+
+# How many candidates each retriever returns, and how many survive fusion.
+RETRIEVER_K = 8
 TOP_K = 5
+
+# Relative weight of vector vs keyword results when fusing (must sum to 1).
+# Keep these equal. With Reciprocal Rank Fusion, an unequal split means a hit that only
+# the weaker retriever found can never outrank the stronger retriever's 5th result,
+# which silently disables keyword matches for section numbers and dollar amounts.
+VECTOR_WEIGHT = 0.5
+KEYWORD_WEIGHT = 0.5
 
 AWS_REGION = os.getenv("AWS_REGION")
 AWS_BEARER_TOKEN_BEDROCK = os.getenv("AWS_BEARER_TOKEN_BEDROCK")
@@ -60,20 +73,20 @@ SYSTEM_PROMPT = (
     "Context:\n{context}"
 )
 
+PROMPT = ChatPromptTemplate.from_messages(
+    [("system", SYSTEM_PROMPT), ("human", "{input}")]
+)
+
 
 # =========================
-# PARSE POLICY
+# POLICY REFERENCE
 # =========================
 
 
-def extract_policy_reference(text: str):
-    match = re.search(
-        r"Policy Section:\s*(.*?)(?:\nAtomic Rule:|\Z)",
-        text,
-        flags=re.DOTALL,
-    )
-
-    content = match.group(1).strip() if match else text.strip()
+# Pull a display-friendly (section_id, title, body) from a retrieved document.
+# The full policy section lives in metadata, not in the embedded page_content.
+def extract_policy_reference(doc):
+    content = doc.metadata.get("policy_text_markdown", "") or ""
 
     header_match = re.match(r"^\s*#+\s*([\d\.]+)\s+(.*)", content)
 
@@ -82,8 +95,8 @@ def extract_policy_reference(text: str):
         title = header_match.group(2).strip()
         body = content[header_match.end() :].strip()
     else:
-        section_id = None
-        title = None
+        section_id = doc.metadata.get("source_id")
+        title = doc.metadata.get("section_title") or None
         body = content
 
     body = re.sub(r"\s+", " ", body)
@@ -110,8 +123,50 @@ def dedupe_sources_by_section(docs):
 
 
 # =========================
-# VECTORSTORE
+# CONTEXT
 # =========================
+
+
+# Assemble the context the model sees.
+# Retrieved rules are grouped by policy section. Each section's full markdown appears
+# once, followed by every retrieved rule (and its Q&A) that belongs to it. This keeps
+# the authoritative wording in front of the model without repeating it per rule.
+def build_context(docs):
+    sections = {}
+    order = []
+
+    for doc in docs:
+        sid = doc.metadata.get("source_id") or "Unknown"
+        if sid not in sections:
+            sections[sid] = {
+                "markdown": doc.metadata.get("policy_text_markdown", "") or "",
+                "rules": [],
+            }
+            order.append(sid)
+        sections[sid]["rules"].append(doc.page_content)
+
+    blocks = []
+    for sid in order:
+        section = sections[sid]
+        block = [f"=== Policy Section {sid} ===", section["markdown"] or "(no section text)", ""]
+        for rule_text in section["rules"]:
+            block.append(rule_text)
+            block.append("")
+        blocks.append("\n".join(block).rstrip())
+
+    return "\n\n".join(blocks)
+
+
+# =========================
+# RETRIEVAL
+# =========================
+
+
+# Tokenizer for the BM25 keyword retriever.
+# Lowercases and strips punctuation so "reimbursable?" matches "reimbursable.", while
+# keeping section numbers ("7.17") and dollar amounts ("$150.00") as single tokens.
+def bm25_tokenize(text):
+    return re.findall(r"\$?\d+(?:\.\d+)*|\w+", text.lower())
 
 
 def load_vectorstore(index_dir: Path):
@@ -124,6 +179,27 @@ def load_vectorstore(index_dir: Path):
         str(index_dir),
         embeddings,
         allow_dangerous_deserialization=True,
+    )
+
+
+# Build the hybrid retriever.
+# - Vector retriever comes straight from the FAISS index.
+# - BM25 keyword retriever is built in memory from the same documents stored in the
+#   FAISS docstore, so there is no second index to maintain on disk.
+# - EnsembleRetriever fuses the two ranked lists with Reciprocal Rank Fusion.
+def build_retriever(vectorstore):
+    documents = list(vectorstore.docstore._dict.values())
+
+    vector_retriever = vectorstore.as_retriever(search_kwargs={"k": RETRIEVER_K})
+
+    keyword_retriever = BM25Retriever.from_documents(
+        documents, preprocess_func=bm25_tokenize
+    )
+    keyword_retriever.k = RETRIEVER_K
+
+    return EnsembleRetriever(
+        retrievers=[vector_retriever, keyword_retriever],
+        weights=[VECTOR_WEIGHT, KEYWORD_WEIGHT],
     )
 
 
@@ -147,36 +223,21 @@ def build_llm():
 
 
 # =========================
-# QA CHAIN
-# =========================
-
-
-def setup_qa_chain(vectorstore):
-    llm = build_llm()
-
-    prompt = ChatPromptTemplate.from_messages(
-        [("system", SYSTEM_PROMPT), ("human", "{input}")]
-    )
-
-    doc_chain = create_stuff_documents_chain(llm, prompt)
-    retriever = vectorstore.as_retriever(search_kwargs={"k": TOP_K})
-
-    return create_retrieval_chain(retriever, doc_chain), retriever
-
-
-# =========================
 # PROCESS QUERY
 # =========================
 
 
-def process_query(query, qa_chain, retriever):
-    docs = retriever.invoke(query)
-    docs = dedupe_sources_by_section(docs)
+def process_query(query, retriever, llm):
+    # Hybrid retrieval, then keep the top fused results
+    docs = retriever.invoke(query)[:TOP_K]
 
-    result = qa_chain.invoke({"input": query})
-    answer = result.get("answer", "No answer returned.")
+    context = build_context(docs)
+    messages = PROMPT.format_messages(context=context, input=query)
 
-    return answer, docs
+    response = llm.invoke(messages)
+    answer = response.content if isinstance(response.content, str) else str(response.content)
+
+    return answer.strip() or "No answer returned.", dedupe_sources_by_section(docs)
 
 
 # =========================
@@ -192,7 +253,7 @@ def print_sources(sources):
         return
 
     for i, s in enumerate(sources, 1):
-        sid, title, body = extract_policy_reference(s.page_content)
+        sid, title, body = extract_policy_reference(s)
 
         sid = sid or s.metadata.get("source_id", "Unknown")
         title = title or "Policy Section"
@@ -213,7 +274,8 @@ def print_sources(sources):
 
 def main():
     vectorstore = load_vectorstore(INDEX_DIR)
-    qa_chain, retriever = setup_qa_chain(vectorstore)
+    retriever = build_retriever(vectorstore)
+    llm = build_llm()
 
     clear_console()
     print(WELCOME_MESSAGE)
@@ -232,7 +294,7 @@ def main():
             print(WELCOME_MESSAGE)
             continue
 
-        answer, sources = process_query(query, qa_chain, retriever)
+        answer, sources = process_query(query, retriever, llm)
 
         print(f"\nA: {answer}")
 
