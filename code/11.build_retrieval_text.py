@@ -8,7 +8,7 @@
 #   - "metadata": everything needed at ANSWER time, including the full policy section
 #     markdown, so the chat step can show the user the exact policy text without it
 #     having influenced retrieval.
-# output: 11.retrieval_chunks.json
+# output: 12.retrieval_chunks.json
 
 import json
 import re
@@ -16,8 +16,8 @@ from pathlib import Path
 
 # Input JSON from the parsing step and output JSON for retrieval chunk generation
 CODE_DIR = Path(__file__).resolve().parent
-INPUT_FILE = CODE_DIR / "8.policyInJson.json"
-OUTPUT_FILE = CODE_DIR / "11.retrieval_chunks.json"
+INPUT_FILE = CODE_DIR / "9.policyInJson.json"
+OUTPUT_FILE = CODE_DIR / "12.retrieval_chunks.json"
 
 
 # Load the source JSON file from disk and verify the top-level structure.

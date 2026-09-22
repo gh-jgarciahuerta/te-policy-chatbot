@@ -26,7 +26,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # Input retrieval chunks (already formatted for embedding)
 CODE_DIR = Path(__file__).resolve().parent
-DATA_PATH = CODE_DIR / "11.retrieval_chunks.json"
+DATA_PATH = CODE_DIR / "12.retrieval_chunks.json"
 
 # Output directory where the FAISS index will be stored
 INDEX_DIR = PROJECT_ROOT / "vectorstore"

@@ -17,7 +17,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 # Input JSON file produced by the CSV-to-JSON transformation step
 CODE_DIR = Path(__file__).resolve().parent
-INPUT_FILE = CODE_DIR / "8.policyInJson.json"
+INPUT_FILE = CODE_DIR / "9.policyInJson.json"
 
 
 # Load the JSON dataset from disk and verify the top-level structure.
