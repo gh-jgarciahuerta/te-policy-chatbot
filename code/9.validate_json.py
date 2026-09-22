@@ -7,11 +7,18 @@
 # before the dataset is used for retrieval chunk generation or FAISS indexing.
 
 import json
+import sys
 from pathlib import Path
 from collections import Counter
 
+# Force UTF-8 stdout so emoji/status characters below don't crash on
+# Windows consoles using a legacy code page (e.g. cp1252).
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 # Input JSON file produced by the CSV-to-JSON transformation step
-INPUT_FILE = Path("Data/outputCSV/output.json")
+CODE_DIR = Path(__file__).resolve().parent
+INPUT_FILE = CODE_DIR / "8.policyInJson.json"
 
 
 # Load the JSON dataset from disk and verify the top-level structure.

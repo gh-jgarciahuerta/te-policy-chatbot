@@ -2,14 +2,15 @@
 # This script converts the structured policy JSON into retrieval-ready text chunks for the RAG system.
 # It takes the parsed preparer and approver records and turns each one into a formatted text block
 # plus lightweight metadata. The output is used downstream for embedding and FAISS index creation.
-# output: retrieval_chunks.json
+# output: 11.retrieval_chunks.json
 
 import json
 from pathlib import Path
 
 # Input JSON from the parsing step and output JSON for retrieval chunk generation
-INPUT_FILE = Path("Data/outputCSV/output.json")
-OUTPUT_FILE = Path("Data/outputCSV/retrieval_chunks.json")
+CODE_DIR = Path(__file__).resolve().parent
+INPUT_FILE = CODE_DIR / "8.policyInJson.json"
+OUTPUT_FILE = CODE_DIR / "11.retrieval_chunks.json"
 
 
 # Load the source JSON file from disk and verify the top-level structure.
@@ -150,7 +151,9 @@ def build_chunk_text(record):
     if "violation_scenario" in record or "rejection_response" in record:
         return build_approver_chunk_text(record)
 
-    raise ValueError(f"Unknown or unsupported chunk_type in record: {record.get('id', '<missing id>')}")
+    raise ValueError(
+        f"Unknown or unsupported chunk_type in record: {record.get('id', '<missing id>')}"
+    )
 
 
 # Build lightweight metadata for the retrieval chunk.

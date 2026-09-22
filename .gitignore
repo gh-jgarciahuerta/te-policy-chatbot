@@ -9,11 +9,18 @@ __pycache__/
 *.pyc
 
 # Data & vector DBs (RAG-specific)
-data/
+# Policy source/derived data files now live alongside the scripts in code/
+code/*.docx
+code/*.xlsx
+code/*.csv
+code/*.md
+code/*.html
+code/*.json
 vectorstore/
 
 # Misc
-zother/
+.zother/
+0Excel/
 
 # OS
 .DS_Store

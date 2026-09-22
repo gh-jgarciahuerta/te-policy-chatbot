@@ -36,7 +36,7 @@ It is designed to:
 
 ## 🔍 How It Works
 
-1. 📄 Policy documents are stored in `data/`
+1. 📄 Policy documents are stored in `code/` alongside the scripts, numbered in pipeline order
 2. 🔢 Documents are converted into embeddings and stored in a vector database
 3. 🔎 User queries are matched against relevant policy sections
 4. 💡 The LLM generates context-aware responses
@@ -45,8 +45,7 @@ It is designed to:
 
 ## 📁 Project Structure
 
-* `code/` – Core application logic
-* `data/` – Source policy documents
+* `code/` – Pipeline scripts and their input/output files, numbered in the order they run
 * `vectorstore/` – Generated embeddings (ignored in Git)
 * `Requirements.txt` – Project dependencies
 
@@ -68,6 +67,6 @@ It is designed to:
 ## ⚠️ Notes
 
 * 🚫 `vectorstore/` should not be committed (generated locally)
-* 🔒 Do not include sensitive data in `data/`
+* 🔒 Do not commit sensitive policy data files (they are git-ignored under `code/`)
 
 ---

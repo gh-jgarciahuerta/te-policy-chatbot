@@ -25,7 +25,8 @@ load_dotenv()
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # Input retrieval chunks (already formatted for embedding)
-DATA_PATH = PROJECT_ROOT / "Data" / "outputCSV" / "retrieval_chunks.json"
+CODE_DIR = Path(__file__).resolve().parent
+DATA_PATH = CODE_DIR / "11.retrieval_chunks.json"
 
 # Output directory where FAISS indexes will be stored
 INDEX_ROOT_DIR = PROJECT_ROOT / "vectorstore"

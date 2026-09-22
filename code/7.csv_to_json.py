@@ -4,7 +4,7 @@
 # 1) preparer chunks built from atomic rules and related Q&A
 # 2) approver chunks built from violation scenarios and rejection responses
 # The output JSON is then used downstream for validation, retrieval chunk creation, and vector indexing.
-# Output: output.json
+# Output: 8.policyInJson.json
 
 import csv
 import json
@@ -12,8 +12,9 @@ import re
 from pathlib import Path
 
 # Input CSV source file and output JSON destination
-INPUT_FILE = Path("data/T&E_RAG_V1.6.csv")
-OUTPUT_FILE = Path("data/outputCSV/output.json")
+CODE_DIR = Path(__file__).resolve().parent
+INPUT_FILE = CODE_DIR / "6.T&E_RAG_V1.4.csv"
+OUTPUT_FILE = CODE_DIR / "8.policyInJson.json"
 
 
 # Normalize text so downstream parsing is more reliable.
